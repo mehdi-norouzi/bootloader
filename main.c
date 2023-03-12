@@ -11,6 +11,22 @@
 
 #define IGNORE 0
 
+typedef struct __attribute__((__packed__)) {
+  uint8_t address;
+  uint8_t device;
+  uint8_t command;
+  uint8_t length;
+  uint16_t crc;
+} command_StructTypedef;
+
+typedef enum {
+  START_FLASH = 0,
+  END_FLASH = 1,
+  TERMINATE = 2,
+  EXIT_BOOTLOADER = 3,
+  START_BOOTLOADER = 4,
+} commands_EnumTypedef;
+
 // Calculate 16-bit CRC for chunk data
 static uint16_t calc_crc(unsigned char *data, int size) {
 #define CRC16 0x8005
@@ -38,6 +54,32 @@ static uint16_t calc_crc(unsigned char *data, int size) {
   }
   return out;
 }
+
+static void pack_command(uint8_t address, uint8_t command) {
+  command_StructTypedef commandPacket = {
+      .address = address / 10,
+      .device = address % 10,
+      .length = 0,
+      .command = command,
+  };
+  commandPacket.crc =
+      calc_crc((uint8_t *)&commandPacket, (sizeof commandPacket) - 2);
+}
+
+static void bootloader(void) {
+  printf("=====================================\r\n"
+         "        Bootloader Started\r\n"
+         "=====================================\r\n\r\n");
+  printf("Enter the address of the device: \r\n");
+  uint8_t addrString[1];
+  scanf("%s", addrString);
+  uint8_t addr = atoi((char *)addrString);
+  printf("device address: %u\r\n", addr);
+  pack_command(addr, START_BOOTLOADER);
+  while (1) {
+  }
+}
+
 
 int main(int argc, char *argv[]) {
   int fd;
@@ -71,10 +113,22 @@ int main(int argc, char *argv[]) {
   cfsetospeed(&serial_settings, B57600);
   tcsetattr(fd, TCSANOW, &serial_settings);
 
+  printf("s -- start flashing process\r\nq -- quit\r\n\r\nEnter a command: ");
+  char command[100];
+  scanf("%s", command);
+  if (strlen(command) > 1) {
+    perror("Error: Invalid command\r\n");
+    exit(1);
+  }
+  if (command[0] == 's') {
+    bootloader();
+  }
+  while (command[0] != 'q') {
+  }
+
   uint8_t count = 0;
   // Send file in 1K chunks with CRC
   while ((bytes_read = fread(chunk_data, 1, CHUNK_SIZE, fp)) > 0) {
-
     // Calculate CRC for chunk data
     crc = calc_crc(chunk_data, bytes_read);
 
