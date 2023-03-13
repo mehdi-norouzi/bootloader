@@ -1,87 +1,58 @@
+#include "crc.h"
+#include "list_bin.h"
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/unistd.h>
 #include <termios.h>
 #include <unistd.h>
 
-#define CHUNK_SIZE 1024
+#define CHUNK_SIZE 255
 #define MAX_RETRIES 5
 
 #define IGNORE 0
 
 typedef struct __attribute__((__packed__)) {
   uint8_t address;
-  uint8_t device;
-  uint8_t command;
-  uint8_t length;
+  uint8_t category;
+  uint8_t context;
   uint16_t crc;
-} command_StructTypedef;
+} packet_StructTypedef;
+
+typedef struct __attribute__((__packed__)) {
+  uint8_t address;
+  uint8_t caetgory;
+  uint8_t context;
+  uint8_t data[CHUNK_SIZE];
+  uint16_t crc;
+} data_StructTypedef;
 
 typedef enum {
-  START_FLASH = 0,
-  END_FLASH = 1,
-  TERMINATE = 2,
+  START_FLASH = 0x06,
+  END_FLASH = 0x07,
+  WRITE_FLASH = 0x08,
   EXIT_BOOTLOADER = 3,
   START_BOOTLOADER = 4,
 } commands_EnumTypedef;
 
-// Calculate 16-bit CRC for chunk data
-static uint16_t calc_crc(unsigned char *data, int size) {
-#define CRC16 0x8005
-  uint16_t out = 0;
-  int bits_read = 0, bit_flag;
-  /* Sanity check: */
-  if (data == NULL)
-    return 0;
-  while (size > 0) {
-    bit_flag = out >> 15;
-    /* Get next bit: */
-    out <<= 1;
-    out |= (*data >> (7 - bits_read)) & 1;
-    /* Increment bit counter: */
-    bits_read++;
-    if (bits_read > 7) {
-      bits_read = 0;
-      data++;
-      size--;
-    }
-    /* Cycle check: */
-    if (bit_flag) {
-      out ^= CRC16;
-    }
-  }
-  return out;
-}
-
-static void pack_command(uint8_t address, uint8_t command) {
-  command_StructTypedef commandPacket = {
-      .address = address / 10,
-      .device = address % 10,
-      .length = 0,
-      .command = command,
+static packet_StructTypedef pack_command(uint8_t address, uint8_t context) {
+  packet_StructTypedef commandPacket = {
+      .address = address,
+      .category = 0x03,
+      .context = context,
   };
   commandPacket.crc =
       calc_crc((uint8_t *)&commandPacket, (sizeof commandPacket) - 2);
+  return commandPacket;
 }
 
-static void bootloader(void) {
+static void bootloader() {
   printf("=====================================\r\n"
          "        Bootloader Started\r\n"
          "=====================================\r\n\r\n");
-  printf("Enter the address of the device: \r\n");
-  uint8_t addrString[1];
-  scanf("%s", addrString);
-  uint8_t addr = atoi((char *)addrString);
-  printf("device address: %u\r\n", addr);
-  pack_command(addr, START_BOOTLOADER);
-  while (1) {
-  }
-}
-
-
-int main(int argc, char *argv[]) {
   int fd;
   struct termios serial_settings;
   unsigned char chunk_data[CHUNK_SIZE + 2]; // Include space for 16-bit CRC
@@ -90,11 +61,11 @@ int main(int argc, char *argv[]) {
   unsigned char ack;
 
   // Open binary file
-  FILE *fp = fopen(argv[1], "rb");
+  /* FILE *fp = fopen("./binaries/fw.bin", "rb");
   if (fp == NULL) {
     perror("Error opening binary file");
     exit(1);
-  }
+  } */
 
   // Open serial port
   fd = open("/dev/ttyUSB0", O_RDWR);
@@ -113,6 +84,53 @@ int main(int argc, char *argv[]) {
   cfsetospeed(&serial_settings, B57600);
   tcsetattr(fd, TCSANOW, &serial_settings);
 
+  printf("Enter the address of the device: \r\n");
+  uint8_t addrString[1];
+  uint8_t contextString[1];
+  scanf("%s", addrString);
+  uint8_t addr = atoi((char *)addrString);
+
+  while (1) {
+    printf("6: Wipe flash area\r\n7: Write to flash\r\n8: End flashing "
+           "process\r\nEnter the command: ");
+    scanf("%s", contextString);
+    uint8_t context = atoi((char *)contextString);
+    packet_StructTypedef command = pack_command(addr, context);
+    sleep(1);
+    write(fd, (uint8_t *)&command, sizeof command);
+    // memset(&fd, 0, sizeof fd);
+    close(fd);
+    fd = open("/dev/ttyUSB0", O_WRONLY);
+    close(fd);
+    sleep(10);
+    fd = open("/dev/ttyUSB0", O_RDONLY);
+    packet_StructTypedef response;
+    while (1) {
+      int res = read(fd, &response, 5);
+      if (res == 5) {
+        printf("%u, %u, %u, %u\r\n", response.address, response.category,
+               response.context, response.crc);
+      } else {
+        printf("read err: %d\r\n", res);
+        break;
+      }
+    }
+    break;
+    /* char **files = find_bin_files();
+    if (files == NULL) {
+      printf("No binary files found\r\n");
+    } else {
+      uint8_t i = 0;
+      while (files[i] != NULL) {
+        printf("%d: %s\r\n", i, files[i]);
+        i++;
+      }
+    } */
+  }
+}
+
+int main(int argc, char *argv[]) {
+
   printf("s -- start flashing process\r\nq -- quit\r\n\r\nEnter a command: ");
   char command[100];
   scanf("%s", command);
@@ -124,8 +142,11 @@ int main(int argc, char *argv[]) {
     bootloader();
   }
   while (command[0] != 'q') {
+    printf("quiting...\r\n");
+    exit(0);
   }
 
+#if IGNORE
   uint8_t count = 0;
   // Send file in 1K chunks with CRC
   while ((bytes_read = fread(chunk_data, 1, CHUNK_SIZE, fp)) > 0) {
@@ -139,7 +160,6 @@ int main(int argc, char *argv[]) {
     printf("crc%u: %u\r\n", count, crc);
     count++;
 
-#if IGNORE
     // Send chunk data
     retries = 0;
     do {
@@ -183,11 +203,11 @@ int main(int argc, char *argv[]) {
       printf("Max retries exceeded. Aborting.\n");
       exit(1);
     }
-#endif // IGNORE
   }
+#endif // IGNORE
 
   // Close binary file and serial port
-  fclose(fp);
-  close(fd);
+  // fclose(fp);
+  // close(fd);
   return 0;
 }
